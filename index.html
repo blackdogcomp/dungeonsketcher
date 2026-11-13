@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Dungeon Sketcher</title>
+<style>
+:root{--bg:#1d1e23;--panel:#292b32;--txt:#e9e6df;--acc:#d9a441;--mut:#9a9aa5;--line:#41444e}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{font:14px system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--txt);display:flex;overflow:hidden}
+aside{width:236px;background:var(--panel);padding:12px 12px 20px;overflow-y:auto;flex-shrink:0;border-right:1px solid var(--line)}
+h1{font-size:17px;margin:2px 0 8px;color:var(--acc);letter-spacing:.5px}
+h2{font-size:11px;text-transform:uppercase;color:var(--mut);margin:16px 0 6px;letter-spacing:1px;font-weight:600}
+.tools{display:grid;grid-template-columns:1fr 1fr;gap:4px}
+button{background:#373a43;color:var(--txt);border:1px solid var(--line);border-radius:5px;padding:6px 7px;cursor:pointer;font:inherit;font-size:13px;text-align:left}
+button:hover{background:#444853}
+button.on{background:var(--acc);color:#1d1e23;border-color:var(--acc);font-weight:600}
+button kbd{float:right;opacity:.55;font:11px ui-monospace,monospace;margin-top:2px}
+.row{display:flex;gap:4px;align-items:center;margin:5px 0}
+.row button{flex:1;text-align:center}
+.row label{color:var(--mut);font-size:12px}
+input[type=number],select{background:#1d1e23;color:var(--txt);border:1px solid var(--line);border-radius:4px;padding:4px 5px;font:inherit;font-size:13px}
+input[type=number]{width:54px}
+select{flex:1}
+main{flex:1;position:relative;min-width:0}
+canvas{display:block;width:100%;height:100%;cursor:crosshair}
+#status{position:absolute;bottom:8px;left:10px;background:rgba(0,0,0,.62);padding:4px 9px;border-radius:4px;font-size:12px;color:#ddd;pointer-events:none}
+.help{font-size:12px;color:var(--mut);line-height:1.55}
+.help b{color:var(--txt);font-weight:600}
+</style>
+</head>
+<body>
+<aside>
+  <h1>⚔ Dungeon Sketcher</h1>
+
+  <h2>Tools</h2>
+  <div class="tools" id="tools"></div>
+
+  <h2>Edit</h2>
+  <div class="row">
+    <button id="undo" title="Ctrl+Z">↶ Undo</button>
+    <button id="redo" title="Ctrl+Y">↷ Redo</button>
+  </div>
+  <div class="row">
+    <button id="clear">Clear map</button>
+    <button id="fit">Fit view</button>
+  </div>
+
+  <h2>Random dungeon</h2>
+  <div class="row">
+    <label>Rooms</label><input type="number" id="genN" value="8" min="2" max="40">
+    <button id="gen">Generate</button>
+  </div>
+
+  <h2>Map</h2>
+  <div class="row">
+    <label>W</label><input type="number" id="mapW" min="8" max="150">
+    <label>H</label><input type="number" id="mapH" min="8" max="150">
+    <button id="resize">Set</button>
+  </div>
+  <div class="row">
+    <label>Style</label>
+    <select id="style">
+      <option value="classic">Classic blue</option>
+      <option value="print">Black &amp; white (print)</option>
+      <option value="ink">Black &amp; white, hatched</option>
+      <option value="parchment">Parchment</option>
+    </select>
+  </div>
+  <div class="row"><label><input type="checkbox" id="fullGrid" checked> Grid on solid rock</label></div>
+
+  <h2>File</h2>
+  <div class="row">
+    <button id="save">Save .json</button>
+    <button id="load">Open…</button>
+  </div>
+  <div class="row"><button id="png">Export PNG</button></div>
+  <input type="file" id="fileIn" accept=".json,application/json" hidden>
+
+  <h2>How to</h2>
+  <div class="help">
+    <b>Room:</b> drag a rectangle. Shift+drag cuts rock back in.<br>
+    <b>Corridor:</b> paint floor freehand (Shift = erase).<br>
+    <b>Doors/objects:</b> click a cell. Click a door or stairs again to rotate it.<br>
+    <b>Right-click</b> a cell to remove its symbol.<br>
+    <b>Pan:</b> right-drag, middle-drag or Space+drag.<br>
+    <b>Zoom:</b> mouse wheel.<br>
+    The map autosaves in this browser.
+  </div>
+</aside>
+<main>
+  <canvas id="cv"></canvas>
+  <div id="status"></div>
+</main>
+
+<script>
+"use strict";
+// ---------- config ----------
+const TOOLS = [
+  ['room','Room','R'],['paint','Corridor','C'],
+  ['erase','Erase','E'],['door','Door','D'],
+  ['locked','Locked door','L'],['secret','Secret door','S'],
+  ['portcullis','Portcullis','O'],['stairs','Stairs','T'],
+  ['trap','Trap','X'],['pillar','Pillar','P'],
+  ['statue','Statue','U'],['chest','Chest','H'],
+  ['num','Room #','N'],['text','Note','W'],
+];
+const ROTATABLE = new Set(['door','locked','secret','portcullis','stairs']);
+const DOORLIKE  = new Set(['door','locked','secret','portcullis']);
+const STYLES = {
+  classic:  {rock:'#3f6fb5', rockGrid:'rgba(255,255,255,.17)', floor:'#ffffff', grid:'#a9c2e6', wall:'#1c3d75', ink:'#1c3d75', hatch:false},
+  print:    {rock:'#ffffff', rockGrid:'rgba(0,0,0,.10)',       floor:'#ffffff', grid:'#bdbdbd', wall:'#000000', ink:'#000000', hatch:false},
+  ink:      {rock:'#ffffff', rockGrid:'rgba(0,0,0,.08)',       floor:'#ffffff', grid:'#cfcfcf', wall:'#111111', ink:'#111111', hatch:true},
+  parchment:{rock:'#6e5c45', rockGrid:'rgba(255,240,210,.10)', floor:'#f2e4c4', grid:'#d6c197', wall:'#2a2015', ink:'#2a2015', hatch:false},
+};
+const STORE_KEY = 'dungeonSketcher.v1';
+
+// ---------- state ----------
+let S = blank(40, 30);
+let style = 'classic', fullGrid = true, tool = 'room';
+let undoStack = [], redoStack = [];
+let cs = 24, ox = 20, oy = 20;   // cell size & view offset (CSS px)
+let hover = null, drag = null, pan = null, spaceDown = false, lastPaint = null;
+
+function blank(w, h){ return {w, h, floor: new Array(w*h).fill(0), feats: {}}; }
+const idx = (x,y) => y*S.w + x;
+const inB = (x,y) => x>=0 && y>=0 && x<S.w && y<S.h;
+const isF = (x,y) => inB(x,y) && S.floor[idx(x,y)] === 1;
+const key = (x,y) => x + ',' + y;
+const ri = (a,b) => a + Math.floor(Math.random()*(b-a+1));
+
+// ---------- undo ----------
+function snap(){ undoStack.push(JSON.stringify(S)); if(undoStack.length>200) undoStack.shift(); redoStack = []; }
+function doUndo(){ if(!undoStack.length) return; redoStack.push(JSON.stringify(S)); S = JSON.parse(undoStack.pop()); changed(); }
+function doRedo(){ if(!redoStack.length) return; undoStack.push(JSON.stringify(S)); S = JSON.parse(redoStack.pop()); changed(); }
+
+function persist(){
+  try{ localStorage.setItem(STORE_KEY, JSON.stringify({S, style, fullGrid})); }catch(e){}
+}
+function changed(){ persist(); syncInputs(); draw(); }
+
+// ---------- canvas ----------
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+let W = 0, H = 0;
+function resizeCanvas(){
+  const dpr = window.devicePixelRatio || 1;
+  W = cv.clientWidth; H = cv.clientHeight;
+  cv.width = Math.round(W*dpr); cv.height = Math.round(H*dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  draw();
+}
+window.addEventListener('resize', resizeCanvas);
+
+function hash(x,y,k){
+  let h = Math.imul(x,374761393) + Math.imul(y,668265263) + Math.imul(k,1442695041);
+  h = Math.imul(h ^ (h>>>13), 1274126177);
+  return ((h ^ (h>>>16))>>>0) / 4294967296;
+}
+
+function render(g, VW, VH, s, vx, vy, editor){
+  const st = STYLES[style];
+  g.fillStyle = st.rock; g.fillRect(0,0,VW,VH);
+  const x0 = Math.max(0, Math.floor(-vx/s)-1), y0 = Math.max(0, Math.floor(-vy/s)-1);
+  const x1 = Math.min(S.w-1, Math.ceil((VW-vx)/s)), y1 = Math.min(S.h-1, Math.ceil((VH-vy)/s));
+  const P = (x,y) => [vx + x*s, vy + y*s];
+
+  // grid on rock
+  if(fullGrid){
+    g.strokeStyle = st.rockGrid; g.lineWidth = 1; g.beginPath();
+    for(let x=x0; x<=x1+1; x++){ const px = Math.round(vx+x*s)+.5; g.moveTo(px, vy+y0*s); g.lineTo(px, vy+(y1+1)*s); }
+    for(let y=y0; y<=y1+1; y++){ const py = Math.round(vy+y*s)+.5; g.moveTo(vx+x0*s, py); g.lineTo(vx+(x1+1)*s, py); }
+    g.stroke();
+  }
+  // map border in editor
+  if(editor){
+    g.strokeStyle = 'rgba(217,164,65,.55)'; g.lineWidth = 1.5; g.setLineDash([6,4]);
+    g.strokeRect(vx-.5, vy-.5, S.w*s+1, S.h*s+1); g.setLineDash([]);
+  }
+  // hatching around walls
+  if(st.hatch){
+    g.lineWidth = Math.max(.8, s*.045); g.strokeStyle = st.ink;
+    for(let y=y0; y<=y1; y++) for(let x=x0; x<=x1; x++){
+      if(isF(x,y)) continue;
+      let near = false;
+      for(let dy=-1; dy<=1 && !near; dy++) for(let dx=-1; dx<=1; dx++) if(isF(x+dx,y+dy)){ near = true; break; }
+      if(!near) continue;
+      const [px,py] = P(x,y);
+      g.save(); g.beginPath(); g.rect(px,py,s,s); g.clip();
+      const a = hash(x,y,1)*Math.PI, dx = Math.cos(a), dy = Math.sin(a), nx = -dy, ny = dx;
+      const cx = px+s/2 + (hash(x,y,2)-.5)*s*.3, cy = py+s/2 + (hash(x,y,3)-.5)*s*.3;
+      g.beginPath();
+      for(let i=-3; i<=3; i++){
+        const hx = cx + nx*i*s*.15, hy = cy + ny*i*s*.15, L = s*(.3 + hash(x,y,4+i)*.25);
+        g.moveTo(hx-dx*L, hy-dy*L); g.lineTo(hx+dx*L, hy+dy*L);
+      }
+      g.stroke(); g.restore();
+    }
+  }
+  // floor
+  g.fillStyle = st.floor;
+  for(let y=y0; y<=y1; y++) for(let x=x0; x<=x1; x++) if(isF(x,y)){ const [px,py] = P(x,y); g.fillRect(px-.5,py-.5,s+1,s+1); }
+  // floor grid
+  g.strokeStyle = st.grid; g.lineWidth = 1; g.beginPath();
+  for(let y=y0; y<=y1; y++) for(let x=x0; x<=x1; x++) if(isF(x,y)){
+    const [px,py] = P(x,y); const L = Math.round(px)+.5, T = Math.round(py)+.5;
+    g.moveTo(L,T); g.lineTo(L+s,T); g.moveTo(L,T); g.lineTo(L,T+s);
+  }
+  g.stroke();
+  // walls
+  g.strokeStyle = st.wall; g.lineWidth = Math.max(2, s*.13); g.lineCap = 'square'; g.beginPath();
+  for(let y=y0; y<=y1; y++) for(let x=x0; x<=x1; x++) if(isF(x,y)){
+    const [px,py] = P(x,y);
+    if(!isF(x,y-1)){ g.moveTo(px,py); g.lineTo(px+s,py); }
+    if(!isF(x,y+1)){ g.moveTo(px,py+s); g.lineTo(px+s,py+s); }
+    if(!isF(x-1,y)){ g.moveTo(px,py); g.lineTo(px,py+s); }
+    if(!isF(x+1,y)){ g.moveTo(px+s,py); g.lineTo(px+s,py+s); }
+  }
+  g.stroke(); g.lineCap = 'butt';
+  // symbols
+  for(const k in S.feats){
+    const [x,y] = k.split(',').map(Number);
+    if(x<x0 || x>x1 || y<y0 || y>y1) continue;
+    const [px,py] = P(x,y);
+    drawFeat(g, S.feats[k], x, y, px, py, s, st);
+  }
+}
+
+// Is the passage through this cell running left-right?
+function passageHoriz(x,y,f){
+  const L = isF(x-1,y), R = isF(x+1,y), U = isF(x,y-1), D = isF(x,y+1);
+  let h = true;
+  if(L && R && !(U && D)) h = true;
+  else if(U && D && !(L && R)) h = false;
+  else if((L || R) && !(U || D)) h = true;
+  else if((U || D) && !(L || R)) h = false;
+  return f.r ? !h : h;
+}
+
+function drawFeat(g, f, x, y, px, py, s, st){
+  const cx = px+s/2, cy = py+s/2;
+  g.strokeStyle = st.ink; g.fillStyle = st.ink; g.lineWidth = Math.max(1.2, s*.07);
+  const t = f.t;
+  if(DOORLIKE.has(t) || t==='stairs'){
+    const h = passageHoriz(x,y,f);
+    g.save(); g.translate(cx,cy); if(!h) g.rotate(Math.PI/2);
+    // now passage runs along the x-axis
+    if(t==='door' || t==='locked'){
+      g.fillStyle = st.floor; g.fillRect(-s*.15,-s*.38,s*.3,s*.76); g.strokeRect(-s*.15,-s*.38,s*.3,s*.76);
+      if(t==='locked'){ g.fillStyle = st.ink; g.beginPath(); g.arc(0,0,s*.09,0,Math.PI*2); g.fill(); }
+    } else if(t==='secret'){
+      g.rotate(h ? 0 : -Math.PI/2);
+      g.font = `bold ${Math.round(s*.72)}px Georgia,serif`; g.textAlign='center'; g.textBaseline='middle';
+      g.lineWidth = 3; g.strokeStyle = st.floor; g.strokeText('S',0,s*.03); g.fillStyle = st.ink; g.fillText('S',0,s*.03);
+    } else if(t==='portcullis'){
+      g.beginPath(); g.moveTo(0,-s*.45); g.lineTo(0,s*.45); g.stroke();
+      for(let i=-2;i<=2;i++){ g.beginPath(); g.arc(0,i*s*.18,s*.06,0,Math.PI*2); g.fill(); }
+    } else if(t==='stairs'){
+      g.lineWidth = Math.max(1, s*.05);
+      g.strokeRect(-s*.42,-s*.38,s*.84,s*.76);
+      for(let i=1;i<5;i++){ const xx = -s*.42 + i*s*.168; g.beginPath(); g.moveTo(xx,-s*.38); g.lineTo(xx,s*.38); g.stroke(); }
+    }
+    g.restore();
+    return;
+  }
+  if(t==='trap'){
+    const r = s*.28; g.strokeRect(cx-r,cy-r,2*r,2*r);
+    g.beginPath(); g.moveTo(cx-r,cy-r); g.lineTo(cx+r,cy+r); g.moveTo(cx+r,cy-r); g.lineTo(cx-r,cy+r); g.stroke();
+  } else if(t==='pillar'){
+    g.beginPath(); g.arc(cx,cy,s*.3,0,Math.PI*2); g.fill();
+  } else if(t==='statue'){
+    g.beginPath(); g.arc(cx,cy,s*.32,0,Math.PI*2); g.stroke();
+    g.beginPath();
+    for(let i=0;i<10;i++){ const a = -Math.PI/2 + i*Math.PI/5, r = i%2 ? s*.1 : s*.24; g.lineTo(cx+Math.cos(a)*r, cy+Math.sin(a)*r); }
+    g.closePath(); g.fill();
+  } else if(t==='chest'){
+    const w = s*.6, h = s*.4; g.fillStyle = st.floor; g.fillRect(cx-w/2,cy-h/2,w,h); g.strokeRect(cx-w/2,cy-h/2,w,h);
+    g.beginPath(); g.moveTo(cx-w/2,cy-h/6); g.lineTo(cx+w/2,cy-h/6); g.stroke();
+    g.fillStyle = st.ink; g.fillRect(cx-s*.05,cy-h/6,s*.1,s*.1);
+  } else if(t==='num'){
+    g.font = `bold ${Math.round(s*.62)}px Georgia,serif`; g.textAlign='center'; g.textBaseline='middle';
+    g.lineWidth = 3; g.strokeStyle = st.floor; g.strokeText(f.v,cx,cy+s*.03); g.fillText(f.v,cx,cy+s*.03);
+  } else if(t==='text'){
+    g.font = `${Math.round(s*.46)}px system-ui,sans-serif`; g.textAlign='left'; g.textBaseline='middle';
+    g.lineWidth = 3; g.strokeStyle = st.floor; g.strokeText(f.v,px+s*.12,cy); g.fillText(f.v,px+s*.12,cy);
+  }
+}
+
+function draw(){
+  if(!W) return;
+  render(ctx, W, H, cs, ox, oy, true);
+  const st = STYLES[style];
+  // room drag preview
+  if(drag && drag.room){
+    const ax = Math.min(drag.x0,drag.x1), ay = Math.min(drag.y0,drag.y1);
+    const bx = Math.max(drag.x0,drag.x1), by = Math.max(drag.y0,drag.y1);
+    ctx.fillStyle = drag.erase ? 'rgba(200,60,60,.30)' : 'rgba(217,164,65,.30)';
+    ctx.fillRect(ox+ax*cs, oy+ay*cs, (bx-ax+1)*cs, (by-ay+1)*cs);
+    ctx.strokeStyle = drag.erase ? '#c83c3c' : '#d9a441'; ctx.lineWidth = 2;
+    ctx.strokeRect(ox+ax*cs, oy+ay*cs, (bx-ax+1)*cs, (by-ay+1)*cs);
+  }
+  if(hover && inB(hover.x,hover.y) && !pan){
+    ctx.strokeStyle = '#d9a441'; ctx.lineWidth = 2;
+    ctx.strokeRect(ox+hover.x*cs+1, oy+hover.y*cs+1, cs-2, cs-2);
+  }
+  updateStatus();
+}
+
+function updateStatus(){
+  const tname = TOOLS.find(t=>t[0]===tool)[1];
+  let s = `Tool: ${tname}`;
+  if(hover && inB(hover.x,hover.y)) s += `  ·  cell ${hover.x+1}, ${hover.y+1}`;
+  if(drag && drag.room) s += `  ·  ${Math.abs(drag.x1-drag.x0)+1} × ${Math.abs(drag.y1-drag.y0)+1}`;
+  s += `  ·  map ${S.w} × ${S.h}`;
+  document.getElementById('status').textContent = s;
+}
+
+// ---------- editing ----------
+function cellAt(e){
+  const r = cv.getBoundingClientRect();
+  return {x: Math.floor((e.clientX - r.left - ox)/cs), y: Math.floor((e.clientY - r.top - oy)/cs)};
+}
+function setCell(x,y,v){
+  if(!inB(x,y)) return;
+  S.floor[idx(x,y)] = v;
+  if(!v) delete S.feats[key(x,y)];
+}
+function paintLine(a,b,v){ // Bresenham so fast strokes don't skip cells
+  let x0=a.x, y0=a.y; const x1=b.x, y1=b.y;
+  const dx=Math.abs(x1-x0), dy=-Math.abs(y1-y0), sx=x0<x1?1:-1, sy=y0<y1?1:-1; let err=dx+dy;
+  for(;;){ setCell(x0,y0,v); if(x0===x1&&y0===y1) break; const e2=2*err; if(e2>=dy){err+=dy;x0+=sx;} if(e2<=dx){err+=dx;y0+=sy;} }
+}
+function nextNum(){
+  let m = 0;
+  for(const k in S.feats){ const f = S.feats[k]; if(f.t==='num'){ const n = parseInt(f.v,10); if(n>m) m = n; } }
+  return m+1;
+}
+function placeFeat(c){
+  if(!inB(c.x,c.y)) return;
+  const k = key(c.x,c.y), ex = S.feats[k];
+  if(tool==='num'){
+    snap();
+    if(ex && ex.t==='num') delete S.feats[k]; else S.feats[k] = {t:'num', v:String(nextNum())};
+  } else if(tool==='text'){
+    const v = prompt('Note text (empty = remove):', ex && ex.t==='text' ? ex.v : '');
+    if(v===null) return;
+    snap();
+    if(v.trim()==='') delete S.feats[k]; else S.feats[k] = {t:'text', v:v.trim()};
+  } else {
+    snap();
+    if(ex && ex.t===tool){
+      if(ROTATABLE.has(tool)) ex.r = !ex.r; else delete S.feats[k];
+    } else {
+      S.feats[k] = {t:tool};
+      if(DOORLIKE.has(tool)) S.floor[idx(c.x,c.y)] = 1; // a door cuts through rock
+    }
+  }
+  changed();
+}
+
+cv.addEventListener('contextmenu', e => e.preventDefault());
+cv.addEventListener('mousedown', e => {
+  const c = cellAt(e);
+  if(e.button===1 || e.button===2 || (e.button===0 && spaceDown)){
+    pan = {sx:e.clientX, sy:e.clientY, ox, oy, moved:false, btn:e.button, cell:c};
+    cv.style.cursor = 'grabbing'; e.preventDefault(); return;
+  }
+  if(e.button!==0) return;
+  if(tool==='room'){
+    drag = {room:true, x0:c.x, y0:c.y, x1:c.x, y1:c.y, erase:e.shiftKey};
+  } else if(tool==='paint' || tool==='erase'){
+    snap();
+    const v = (tool==='paint' && !e.shiftKey) ? 1 : 0;
+    drag = {paint:true, v};
+    lastPaint = c; setCell(c.x,c.y,v);
+  } else {
+    placeFeat(c);
+  }
+  draw();
+});
+window.addEventListener('mousemove', e => {
+  if(pan){
+    const dx = e.clientX-pan.sx, dy = e.clientY-pan.sy;
+    if(Math.abs(dx)+Math.abs(dy) > 3) pan.moved = true;
+    ox = pan.ox+dx; oy = pan.oy+dy; draw(); return;
+  }
+  const c = cellAt(e);
+  const r = cv.getBoundingClientRect();
+  const inside = e.clientX>=r.left && e.clientX<=r.right && e.clientY>=r.top && e.clientY<=r.bottom;
+  hover = inside ? c : null;
+  if(drag && drag.room){ drag.x1 = c.x; drag.y1 = c.y; }
+  if(drag && drag.paint && lastPaint && (c.x!==lastPaint.x || c.y!==lastPaint.y)){ paintLine(lastPaint, c, drag.v); lastPaint = c; }
+  draw();
+});
+window.addEventListener('mouseup', e => {
+  if(pan){
+    if(!pan.moved && pan.btn===2){
+      const k = key(pan.cell.x, pan.cell.y);
+      if(S.feats[k]){ snap(); delete S.feats[k]; changed(); }
+    }
+    pan = null; cv.style.cursor = spaceDown ? 'grab' : 'crosshair'; draw(); return;
+  }
+  if(drag && drag.room){
+    const ax = Math.max(0,Math.min(drag.x0,drag.x1)), ay = Math.max(0,Math.min(drag.y0,drag.y1));
+    const bx = Math.min(S.w-1,Math.max(drag.x0,drag.x1)), by = Math.min(S.h-1,Math.max(drag.y0,drag.y1));
+    if(ax<=bx && ay<=by){
+      snap();
+      for(let y=ay;y<=by;y++) for(let x=ax;x<=bx;x++) setCell(x,y, drag.erase?0:1);
+    }
+    drag = null; changed(); return;
+  }
+  if(drag && drag.paint){ drag = null; lastPaint = null; changed(); return; }
+});
+cv.addEventListener('mouseleave', () => { hover = null; draw(); });
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  const r = cv.getBoundingClientRect(), mx = e.clientX-r.left, my = e.clientY-r.top;
+  const ncs = Math.min(110, Math.max(6, cs * (e.deltaY<0 ? 1.12 : 1/1.12)));
+  ox = mx - (mx-ox)*ncs/cs; oy = my - (my-oy)*ncs/cs; cs = ncs; draw();
+}, {passive:false});
+
+window.addEventListener('keydown', e => {
+  if(e.target.tagName==='INPUT' || e.target.tagName==='SELECT') return;
+  if((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==='z'){ e.preventDefault(); e.shiftKey ? doRedo() : doUndo(); return; }
+  if((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==='y'){ e.preventDefault(); doRedo(); return; }
+  if(e.key===' '){ spaceDown = true; if(!pan) cv.style.cursor = 'grab'; e.preventDefault(); return; }
+  if(e.ctrlKey||e.metaKey||e.altKey) return;
+  const t = TOOLS.find(t => t[2]===e.key.toUpperCase());
+  if(t) setTool(t[0]);
+});
+window.addEventListener('keyup', e => { if(e.key===' '){ spaceDown = false; if(!pan) cv.style.cursor = 'crosshair'; } });
+
+// ---------- generator ----------
+function generate(n){
+  const w = S.w, h = S.h, N = blank(w,h), rid = new Array(w*h).fill(-1), rooms = [];
+  const I = (x,y) => y*w + x;
+  let tries = 0;
+  while(rooms.length<n && tries<3000){
+    tries++;
+    const rw = ri(3, Math.min(9, w-4)), rh = ri(3, Math.min(7, h-4));
+    const x = ri(1, w-rw-1), y = ri(1, h-rh-1);
+    if(rooms.some(r => x < r.x+r.w+2 && x+rw+2 > r.x && y < r.y+r.h+2 && y+rh+2 > r.y)) continue;
+    rooms.push({x, y, w:rw, h:rh});
+  }
+  rooms.sort((a,b) => (a.x + a.y*.6) - (b.x + b.y*.6));
+  rooms.forEach((r,i) => { for(let y=r.y;y<r.y+r.h;y++) for(let x=r.x;x<r.x+r.w;x++){ N.floor[I(x,y)] = 1; rid[I(x,y)] = i; } });
+  const carve = (a,b) => {
+    const ax = ri(a.x+1, a.x+a.w-2), ay = ri(a.y+1, a.y+a.h-2);
+    const bx = ri(b.x+1, b.x+b.w-2), by = ri(b.y+1, b.y+b.h-2);
+    const path = []; let x = ax, y = ay; path.push([x,y]);
+    const stepX = () => { while(x!==bx){ x += Math.sign(bx-x); path.push([x,y]); } };
+    const stepY = () => { while(y!==by){ y += Math.sign(by-y); path.push([x,y]); } };
+    if(Math.random()<.5){ stepX(); stepY(); } else { stepY(); stepX(); }
+    path.forEach(([x,y]) => N.floor[I(x,y)] = 1);
+    for(let k=0;k<path.length;k++){
+      const [x,y] = path[k]; if(rid[I(x,y)]!==-1) continue;
+      const prevIn = k>0 && rid[I(...path[k-1])]!==-1, nextIn = k<path.length-1 && rid[I(...path[k+1])]!==-1;
+      if((prevIn||nextIn) && !N.feats[key(x,y)]){
+        const p = Math.random();
+        if(p < .55) N.feats[key(x,y)] = {t:'door'};
+        else if(p < .70) N.feats[key(x,y)] = {t:'locked'};
+        else if(p < .82) N.feats[key(x,y)] = {t:'secret'};
+        // else: open archway
+      }
+    }
+  };
+  for(let i=1;i<rooms.length;i++) carve(rooms[i-1], rooms[i]);
+  for(let i=0;i<Math.floor(rooms.length/4);i++){ const a = ri(0,rooms.length-1), b = ri(0,rooms.length-1); if(a!==b) carve(rooms[a], rooms[b]); }
+  // dressing
+  rooms.forEach((r,i) => {
+    N.feats[key(r.x,r.y)] = {t:'num', v:String(i+1)};
+    if(r.w>=6 && r.h>=5 && Math.random()<.5){
+      [[r.x+1,r.y+1],[r.x+r.w-2,r.y+1],[r.x+1,r.y+r.h-2],[r.x+r.w-2,r.y+r.h-2]].forEach(([x,y]) => { if(!N.feats[key(x,y)]) N.feats[key(x,y)] = {t:'pillar'}; });
+    }
+    if(i>0 && Math.random()<.3){ const x = ri(r.x+1,r.x+r.w-1), y = ri(r.y+1,r.y+r.h-1); if(!N.feats[key(x,y)]) N.feats[key(x,y)] = {t:'chest'}; }
+    if(i>0 && Math.random()<.15){ const x = r.x + Math.floor(r.w/2), y = r.y + Math.floor(r.h/2); if(!N.feats[key(x,y)]) N.feats[key(x,y)] = {t:'statue'}; }
+  });
+  if(rooms.length){ const r = rooms[0]; const x = r.x+r.w-1, y = r.y+r.h-1; N.feats[key(x,y)] = {t:'stairs'}; }
+  const corr = [];
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++) if(N.floor[I(x,y)] && rid[I(x,y)]===-1 && !N.feats[key(x,y)]) corr.push([x,y]);
+  for(let i=0;i<Math.floor(rooms.length/3) && corr.length;i++){ const [x,y] = corr.splice(ri(0,corr.length-1),1)[0]; N.feats[key(x,y)] = {t:'trap'}; }
+  S = N;
+}
+
+// ---------- map / view ----------
+function fitView(){
+  if(!W) return;
+  cs = Math.max(6, Math.min(60, Math.min((W-40)/S.w, (H-40)/S.h)));
+  ox = (W - S.w*cs)/2; oy = (H - S.h*cs)/2; draw();
+}
+function resizeMap(w,h){
+  w = Math.max(8, Math.min(150, w|0)); h = Math.max(8, Math.min(150, h|0));
+  if(w===S.w && h===S.h) return;
+  snap();
+  const N = blank(w,h);
+  for(let y=0;y<Math.min(h,S.h);y++) for(let x=0;x<Math.min(w,S.w);x++) N.floor[y*w+x] = S.floor[idx(x,y)];
+  for(const k in S.feats){ const [x,y] = k.split(',').map(Number); if(x<w && y<h) N.feats[k] = S.feats[k]; }
+  S = N; changed(); fitView();
+}
+function syncInputs(){
+  document.getElementById('mapW').value = S.w;
+  document.getElementById('mapH').value = S.h;
+  document.getElementById('style').value = style;
+  document.getElementById('fullGrid').checked = fullGrid;
+}
+
+// ---------- files ----------
+function download(name, blob){
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+function validMap(o){
+  return o && Number.isInteger(o.w) && Number.isInteger(o.h) && Array.isArray(o.floor) && o.floor.length===o.w*o.h && typeof o.feats==='object';
+}
+document.getElementById('save').onclick = () => download('dungeon.json', new Blob([JSON.stringify({app:'dungeon-sketcher', version:1, style, map:S})], {type:'application/json'}));
+document.getElementById('load').onclick = () => document.getElementById('fileIn').click();
+document.getElementById('fileIn').onchange = e => {
+  const f = e.target.files[0]; if(!f) return;
+  const rd = new FileReader();
+  rd.onload = () => {
+    try{
+      const o = JSON.parse(rd.result), m = o.map || o;
+      if(!validMap(m)) throw new Error('bad');
+      snap(); S = {w:m.w, h:m.h, floor:m.floor, feats:m.feats || {}};
+      if(o.style && STYLES[o.style]) style = o.style;
+      changed(); fitView();
+    }catch(err){ alert('That file is not a Dungeon Sketcher map.'); }
+  };
+  rd.readAsText(f); e.target.value = '';
+};
+document.getElementById('png').onclick = () => {
+  const s = 32, m = 32, c = document.createElement('canvas');
+  c.width = S.w*s + m*2; c.height = S.h*s + m*2;
+  render(c.getContext('2d'), c.width, c.height, s, m, m, false);
+  c.toBlob(b => download('dungeon.png', b), 'image/png');
+};
+
+// ---------- UI wiring ----------
+function setTool(t){
+  tool = t;
+  document.querySelectorAll('#tools button').forEach(b => b.classList.toggle('on', b.dataset.t===t));
+  updateStatus();
+}
+const toolsEl = document.getElementById('tools');
+TOOLS.forEach(([id,label,k]) => {
+  const b = document.createElement('button'); b.dataset.t = id;
+  b.innerHTML = `${label}<kbd>${k}</kbd>`; b.onclick = () => setTool(id);
+  toolsEl.appendChild(b);
+});
+document.getElementById('undo').onclick = doUndo;
+document.getElementById('redo').onclick = doRedo;
+document.getElementById('clear').onclick = () => { if(confirm('Clear the whole map?')){ snap(); S = blank(S.w,S.h); changed(); } };
+document.getElementById('fit').onclick = fitView;
+document.getElementById('gen').onclick = () => {
+  const n = Math.max(2, Math.min(40, parseInt(document.getElementById('genN').value,10) || 8));
+  snap(); generate(n); changed();
+};
+document.getElementById('resize').onclick = () => resizeMap(+document.getElementById('mapW').value, +document.getElementById('mapH').value);
+document.getElementById('style').onchange = e => { style = e.target.value; changed(); };
+document.getElementById('fullGrid').onchange = e => { fullGrid = e.target.checked; changed(); };
+
+// ---------- start ----------
+(function init(){
+  let loaded = false;
+  try{
+    const o = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
+    if(o && validMap(o.S)){ S = o.S; if(STYLES[o.style]) style = o.style; fullGrid = o.fullGrid !== false; loaded = true; }
+  }catch(e){}
+  if(!loaded) generate(8);
+  syncInputs(); setTool('room');
+  resizeCanvas(); fitView(); persist();
+})();
+</script>
+</body>
+</html>

@@ -35,7 +35,7 @@ canvas{display:block;width:100%;height:100%;cursor:crosshair}
 </head>
 <body>
 <aside>
-  <h1>⚔ Dungeon Sketcher <span style="font-size:11px;color:var(--mut);font-weight:400;letter-spacing:0">v1.2</span></h1>
+  <h1>⚔ Dungeon Sketcher <span style="font-size:11px;color:var(--mut);font-weight:400;letter-spacing:0">v1.4</span></h1>
 
   <h2>Tools</h2>
   <div class="tools" id="tools"></div>
@@ -86,9 +86,11 @@ canvas{display:block;width:100%;height:100%;cursor:crosshair}
   <h2>How to</h2>
   <div class="help">
     <b>Room:</b> drag a rectangle. Shift+drag cuts rock back in.<br>
+    <b>Inner wall:</b> drag along the grid lines inside a room. Click a wall piece to remove it, Shift+drag erases.<br>
     <b>Corridor:</b> paint floor freehand (Shift = erase).<br>
-    <b>Doors/objects:</b> click a cell. Click a door or stairs again to rotate it.<br>
-    <b>Right-click</b> a cell to remove its symbol.<br>
+    <b>Doors:</b> click the border between two squares. Click it again to remove the door.<br>
+    <b>Objects:</b> click a cell. Click stairs again to rotate them.<br>
+    <b>Right-click</b> a symbol or a door to remove it.<br>
     <b>Pan:</b> right-drag, middle-drag or Space+drag.<br>
     <b>Zoom:</b> mouse wheel.<br>
     The map autosaves in this browser.
@@ -110,6 +112,7 @@ const TOOLS = [
   ['trap','Trap','X'],['pillar','Pillar','P'],
   ['statue','Statue','U'],['chest','Chest','H'],
   ['num','Room #','N'],['text','Note','W'],
+  ['wall','Inner wall','I'],
 ];
 const ROTATABLE = new Set(['door','locked','secret','portcullis','stairs']);
 const DOORLIKE  = new Set(['door','locked','secret','portcullis']);
@@ -126,13 +129,21 @@ let S = blank(40, 30);
 let style = 'classic', fullGrid = true, tool = 'room';
 let undoStack = [], redoStack = [];
 let cs = 24, ox = 20, oy = 20;   // cell size & view offset (CSS px)
+let hoverW = null; // wall tool: nearest grid corner and grid edge under the mouse
 let hover = null, drag = null, pan = null, spaceDown = false, lastPaint = null;
 
-function blank(w, h){ return {w, h, floor: new Array(w*h).fill(0), feats: {}}; }
+function blank(w, h){ return {w, h, floor: new Array(w*h).fill(0), feats: {}, walls: {}, doors: {}}; }
 const idx = (x,y) => y*S.w + x;
 const inB = (x,y) => x>=0 && y>=0 && x<S.w && y<S.h;
 const isF = (x,y) => inB(x,y) && S.floor[idx(x,y)] === 1;
 const key = (x,y) => x + ',' + y;
+// Inner walls live on cell edges: 'h,x,y' = top edge of cell x,y ; 'v,x,y' = left edge of cell x,y
+function edgeParts(k){ const p = k.split(','); return [p[0], +p[1], +p[2]]; }
+function edgeOK(k){ const [t,x,y] = edgeParts(k); return t==='h' ? (isF(x,y-1) && isF(x,y)) : (isF(x-1,y) && isF(x,y)); }
+// Doors sit on cell edges too (same keys as walls): S.doors[edge] = {t:'door'|'locked'|'secret'|'portcullis'}
+function edgeAny(k){ const [t,x,y] = edgeParts(k); return t==='h' ? (isF(x,y-1) || isF(x,y)) : (isF(x-1,y) || isF(x,y)); }
+const edgeTool = () => tool==='wall' || DOORLIKE.has(tool);
+function wallEnd(d){ return Math.abs(d.x1-d.x0) >= Math.abs(d.y1-d.y0) ? [d.x1, d.y0] : [d.x0, d.y1]; } // keep the line straight
 const ri = (a,b) => a + Math.floor(Math.random()*(b-a+1));
 
 // ---------- undo ----------
@@ -222,7 +233,15 @@ function render(g, VW, VH, s, vx, vy, editor){
     if(!isF(x-1,y)){ g.moveTo(px,py); g.lineTo(px,py+s); }
     if(!isF(x+1,y)){ g.moveTo(px+s,py); g.lineTo(px+s,py+s); }
   }
+  // inner walls
+  for(const k in S.walls){
+    if(!edgeOK(k)) continue;
+    const [t,x,y] = edgeParts(k); const [px,py] = P(x,y);
+    g.moveTo(px,py); if(t==='h') g.lineTo(px+s,py); else g.lineTo(px,py+s);
+  }
   g.stroke(); g.lineCap = 'butt';
+  // doors on cell borders
+  for(const k in S.doors){ if(edgeAny(k)) drawEdgeDoor(g, S.doors[k].t, k, vx, vy, s, st); }
   // symbols
   for(const k in S.feats){
     const [x,y] = k.split(',').map(Number);
@@ -230,6 +249,30 @@ function render(g, VW, VH, s, vx, vy, editor){
     const [px,py] = P(x,y);
     drawFeat(g, S.feats[k], x, y, px, py, s, st);
   }
+}
+
+// A door drawn on the border between two cells
+function drawEdgeDoor(g, t, k, vx, vy, s, st){
+  const [e,x,y] = edgeParts(k), px = vx + x*s, py = vy + y*s;
+  g.save(); g.translate(e==='h' ? px+s/2 : px, e==='h' ? py : py+s/2); if(e==='h') g.rotate(Math.PI/2);
+  // now the border runs along the y-axis and the passage along the x-axis
+  if(t!=='portcullis'){ // the wall line the door sits in
+    g.strokeStyle = st.wall; g.lineWidth = Math.max(2, s*.13); g.lineCap = 'square';
+    g.beginPath(); g.moveTo(0,-s/2); g.lineTo(0,s/2); g.stroke(); g.lineCap = 'butt';
+  }
+  g.strokeStyle = st.ink; g.fillStyle = st.ink; g.lineWidth = Math.max(1.2, s*.07);
+  if(t==='door' || t==='locked'){
+    g.fillStyle = st.floor; g.fillRect(-s*.15,-s*.38,s*.3,s*.76); g.strokeRect(-s*.15,-s*.38,s*.3,s*.76);
+    if(t==='locked'){ g.fillStyle = st.ink; g.beginPath(); g.arc(0,0,s*.09,0,Math.PI*2); g.fill(); }
+  } else if(t==='secret'){
+    if(e==='h') g.rotate(-Math.PI/2);
+    g.font = `bold ${Math.round(s*.72)}px Georgia,serif`; g.textAlign='center'; g.textBaseline='middle';
+    g.lineWidth = Math.max(3, s*.16); g.strokeStyle = st.floor; g.strokeText('S',0,s*.03); g.fillStyle = st.ink; g.fillText('S',0,s*.03);
+  } else if(t==='portcullis'){
+    g.beginPath(); g.moveTo(0,-s*.5); g.lineTo(0,s*.5); g.stroke();
+    for(let i=-2;i<=2;i++){ g.beginPath(); g.arc(0,i*s*.18,s*.07,0,Math.PI*2); g.fill(); }
+  }
+  g.restore();
 }
 
 // Is the passage through this cell running left-right?
@@ -319,7 +362,15 @@ function paint(){
     ctx.fillRect(ox+ax*cs, oy+ay*cs, (bx-ax+1)*cs, (by-ay+1)*cs);
     outline(ox+ax*cs, oy+ay*cs, (bx-ax+1)*cs, (by-ay+1)*cs, drag.erase ? '#c83c3c' : '#d9a441');
   }
-  if(hover && inB(hover.x,hover.y) && !pan) outline(ox+hover.x*cs+1, oy+hover.y*cs+1, cs-2, cs-2, '#d9a441');
+  // inner wall preview
+  if(drag && drag.wall){
+    const [ex,ey] = wallEnd(drag);
+    if(ex!==drag.x0 || ey!==drag.y0) hline(ox+drag.x0*cs, oy+drag.y0*cs, ox+ex*cs, oy+ey*cs, drag.erase ? '#c83c3c' : '#d9a441');
+  } else if(edgeTool() && hoverW && !pan && (tool==='wall' || edgeAny(hoverW.ek))){
+    const [t,x,y] = edgeParts(hoverW.ek);
+    hline(ox+x*cs, oy+y*cs, ox+(t==='h'?x+1:x)*cs, oy+(t==='h'?y:y+1)*cs, '#d9a441');
+  }
+  if(!edgeTool() && hover && inB(hover.x,hover.y) && !pan) outline(ox+hover.x*cs+1, oy+hover.y*cs+1, cs-2, cs-2, '#d9a441');
   updateStatus();
 }
 
@@ -328,11 +379,18 @@ function outline(x,y,w,h,color){
   if(mono()){ ctx.strokeStyle = '#fff'; ctx.lineWidth = 4.5; ctx.strokeRect(x,y,w,h); ctx.strokeStyle = '#000'; ctx.lineWidth = 1.5; ctx.strokeRect(x,y,w,h); }
   else { ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.strokeRect(x,y,w,h); }
 }
+function hline(xa,ya,xb,yb,color){
+  ctx.lineCap = 'round';
+  const seg = (c,w) => { ctx.strokeStyle = c; ctx.lineWidth = w; ctx.beginPath(); ctx.moveTo(xa,ya); ctx.lineTo(xb,yb); ctx.stroke(); };
+  if(mono()){ seg('#fff', 7); seg('#000', 3); } else seg(color, 4);
+  ctx.lineCap = 'butt';
+}
 function updateStatus(){
   const tname = TOOLS.find(t=>t[0]===tool)[1];
   let s = `Tool: ${tname}`;
   if(hover && inB(hover.x,hover.y)) s += `  ·  cell ${hover.x+1}, ${hover.y+1}`;
   if(drag && drag.room) s += `  ·  ${Math.abs(drag.x1-drag.x0)+1} × ${Math.abs(drag.y1-drag.y0)+1}`;
+  if(drag && drag.wall){ const [ex,ey] = wallEnd(drag); const n = Math.abs(ex-drag.x0)+Math.abs(ey-drag.y0); if(n) s += `  ·  wall ${n}`; }
   s += `  ·  map ${S.w} × ${S.h}`;
   document.getElementById('status').textContent = s;
 }
@@ -342,10 +400,24 @@ function cellAt(e){
   const r = cv.getBoundingClientRect();
   return {x: Math.floor((e.clientX - r.left - ox)/cs), y: Math.floor((e.clientY - r.top - oy)/cs)};
 }
+function wallAt(e){
+  const r = cv.getBoundingClientRect();
+  const fx = (e.clientX - r.left - ox)/cs, fy = (e.clientY - r.top - oy)/cs;
+  const cx = Math.floor(fx), cy = Math.floor(fy), dx = fx-cx, dy = fy-cy;
+  const m = Math.min(dx, 1-dx, dy, 1-dy);
+  const ek = m===dy ? 'h,'+cx+','+cy : m===1-dy ? 'h,'+cx+','+(cy+1) : m===dx ? 'v,'+cx+','+cy : 'v,'+(cx+1)+','+cy;
+  return {vx: Math.round(fx), vy: Math.round(fy), ek, m};
+}
 function setCell(x,y,v){
   if(!inB(x,y)) return;
   S.floor[idx(x,y)] = v;
-  if(!v) delete S.feats[key(x,y)];
+  if(!v){
+    delete S.feats[key(x,y)];
+    for(const k of ['h,'+x+','+y, 'h,'+x+','+(y+1), 'v,'+x+','+y, 'v,'+(x+1)+','+y]){
+      delete S.walls[k];
+      if(S.doors[k] && !edgeAny(k)) delete S.doors[k]; // a door with rock on both sides goes too
+    }
+  }
 }
 function paintLine(a,b,v){ // Bresenham so fast strokes don't skip cells
   let x0=a.x, y0=a.y; const x1=b.x, y1=b.y;
@@ -390,6 +462,16 @@ cv.addEventListener('mousedown', e => {
   if(e.button!==0) return;
   if(tool==='room'){
     drag = {room:true, x0:c.x, y0:c.y, x1:c.x, y1:c.y, erase:e.shiftKey};
+  } else if(DOORLIKE.has(tool)){          // doors go on the nearest border of the square
+    const k = wallAt(e).ek, ex = S.doors[k];
+    if(ex || edgeAny(k)){
+      snap();
+      if(ex && ex.t===tool) delete S.doors[k]; else S.doors[k] = {t:tool};
+      changed();
+    }
+  } else if(tool==='wall'){
+    const w = wallAt(e);
+    drag = {wall:true, x0:w.vx, y0:w.vy, x1:w.vx, y1:w.vy, ek:w.ek, erase:e.shiftKey};
   } else if(tool==='paint' || tool==='erase'){
     snap();
     const v = (tool==='paint' && !e.shiftKey) ? 1 : 0;
@@ -409,9 +491,12 @@ window.addEventListener('mousemove', e => {
   const c = cellAt(e);
   const r = cv.getBoundingClientRect();
   const inside = e.clientX>=r.left && e.clientX<=r.right && e.clientY>=r.top && e.clientY<=r.bottom;
-  if(lastMove && lastMove.x===c.x && lastMove.y===c.y && lastMove.inside===inside) return; // same cell: nothing to redraw
-  lastMove = {x:c.x, y:c.y, inside};
-  hover = inside ? c : null;
+  const w = edgeTool() ? wallAt(e) : null;
+  if(lastMove && lastMove.x===c.x && lastMove.y===c.y && lastMove.inside===inside &&
+     (!w || (lastMove.ek===w.ek && lastMove.vx===w.vx && lastMove.vy===w.vy))) return; // nothing to redraw
+  lastMove = {x:c.x, y:c.y, inside, ek:w&&w.ek, vx:w&&w.vx, vy:w&&w.vy};
+  hover = inside ? c : null; hoverW = inside ? w : null;
+  if(drag && drag.wall && w){ drag.x1 = w.vx; drag.y1 = w.vy; }
   if(drag && drag.room){ drag.x1 = c.x; drag.y1 = c.y; }
   if(drag && drag.paint && lastPaint && (c.x!==lastPaint.x || c.y!==lastPaint.y)){ paintLine(lastPaint, c, drag.v); lastPaint = c; draw(); return; }
   draw(true);
@@ -420,8 +505,9 @@ let lastMove = null;
 window.addEventListener('mouseup', e => {
   if(pan){
     if(!pan.moved && pan.btn===2){
-      const k = key(pan.cell.x, pan.cell.y);
-      if(S.feats[k]){ snap(); delete S.feats[k]; changed(); }
+      const k = key(pan.cell.x, pan.cell.y), w = wallAt(e);
+      if(S.doors[w.ek] && (w.m < .25 || !S.feats[k])){ snap(); delete S.doors[w.ek]; changed(); }
+      else if(S.feats[k]){ snap(); delete S.feats[k]; changed(); }
     }
     pan = null; cv.style.cursor = spaceDown ? 'grab' : 'crosshair'; draw(); return;
   }
@@ -434,9 +520,22 @@ window.addEventListener('mouseup', e => {
     }
     drag = null; changed(); return;
   }
+  if(drag && drag.wall){
+    const d = drag, [ex,ey] = wallEnd(d); drag = null;
+    if(ex===d.x0 && ey===d.y0){            // plain click: add / remove the nearest wall segment
+      if(S.walls[d.ek]){ snap(); delete S.walls[d.ek]; }
+      else if(!d.erase && edgeOK(d.ek)){ snap(); S.walls[d.ek] = 1; }
+    } else {
+      snap();
+      const put = k => { if(d.erase) delete S.walls[k]; else if(edgeOK(k)) S.walls[k] = 1; };
+      if(ey===d.y0) for(let x=Math.min(d.x0,ex); x<Math.max(d.x0,ex); x++) put('h,'+x+','+d.y0);
+      else          for(let y=Math.min(d.y0,ey); y<Math.max(d.y0,ey); y++) put('v,'+d.x0+','+y);
+    }
+    changed(); return;
+  }
   if(drag && drag.paint){ drag = null; lastPaint = null; changed(); return; }
 });
-cv.addEventListener('mouseleave', () => { hover = null; lastMove = null; draw(true); });
+cv.addEventListener('mouseleave', () => { hover = null; hoverW = null; lastMove = null; draw(true); });
 cv.addEventListener('wheel', e => {
   e.preventDefault();
   const r = cv.getBoundingClientRect(), mx = e.clientX-r.left, my = e.clientY-r.top;
@@ -480,11 +579,14 @@ function generate(n){
     for(let k=0;k<path.length;k++){
       const [x,y] = path[k]; if(rid[I(x,y)]!==-1) continue;
       const prevIn = k>0 && rid[I(...path[k-1])]!==-1, nextIn = k<path.length-1 && rid[I(...path[k+1])]!==-1;
-      if((prevIn||nextIn) && !N.feats[key(x,y)]){
+      if(prevIn||nextIn){
+        const [qx,qy] = prevIn ? path[k-1] : path[k+1];   // the room cell next to this corridor cell
+        const ek = qx!==x ? 'v,'+Math.max(x,qx)+','+y : 'h,'+x+','+Math.max(y,qy);
+        if(N.doors[ek]) continue;
         const p = Math.random();
-        if(p < .55) N.feats[key(x,y)] = {t:'door'};
-        else if(p < .70) N.feats[key(x,y)] = {t:'locked'};
-        else if(p < .82) N.feats[key(x,y)] = {t:'secret'};
+        if(p < .55) N.doors[ek] = {t:'door'};
+        else if(p < .70) N.doors[ek] = {t:'locked'};
+        else if(p < .82) N.doors[ek] = {t:'secret'};
         // else: open archway
       }
     }
@@ -520,6 +622,8 @@ function resizeMap(w,h){
   const N = blank(w,h);
   for(let y=0;y<Math.min(h,S.h);y++) for(let x=0;x<Math.min(w,S.w);x++) N.floor[y*w+x] = S.floor[idx(x,y)];
   for(const k in S.feats){ const [x,y] = k.split(',').map(Number); if(x<w && y<h) N.feats[k] = S.feats[k]; }
+  for(const k in S.walls){ const [t,x,y] = edgeParts(k); if(x<w && y<h) N.walls[k] = 1; }
+  for(const k in S.doors){ const [t,x,y] = edgeParts(k); if(x<=w && y<=h) N.doors[k] = S.doors[k]; }
   S = N; changed(); fitView();
 }
 function syncInputs(){
@@ -546,7 +650,7 @@ document.getElementById('fileIn').onchange = e => {
     try{
       const o = JSON.parse(rd.result), m = o.map || o;
       if(!validMap(m)) throw new Error('bad');
-      snap(); S = {w:m.w, h:m.h, floor:m.floor, feats:m.feats || {}};
+      snap(); S = {w:m.w, h:m.h, floor:m.floor, feats:m.feats || {}, walls:(m.walls && typeof m.walls==='object') ? m.walls : {}, doors:(m.doors && typeof m.doors==='object') ? m.doors : {}};
       if(o.style && STYLES[o.style]) style = o.style;
       changed(); fitView();
     }catch(err){ alert('That file is not a Dungeon Sketcher map.'); }
@@ -564,7 +668,8 @@ document.getElementById('png').onclick = () => {
 function setTool(t){
   tool = t;
   document.querySelectorAll('#tools button').forEach(b => b.classList.toggle('on', b.dataset.t===t));
-  updateStatus();
+  hoverW = null; lastMove = null;
+  draw(true);
 }
 const toolsEl = document.getElementById('tools');
 TOOLS.forEach(([id,label,k]) => {
@@ -603,7 +708,7 @@ document.getElementById('bTheme').onclick = () => setTheme(THEMES[(THEMES.indexO
   let loaded = false;
   try{
     const o = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
-    if(o && validMap(o.S)){ S = o.S; if(STYLES[o.style]) style = o.style; fullGrid = o.fullGrid !== false; loaded = true; }
+    if(o && validMap(o.S)){ S = o.S; if(!S.walls || typeof S.walls!=='object') S.walls = {}; if(!S.doors || typeof S.doors!=='object') S.doors = {}; if(STYLES[o.style]) style = o.style; fullGrid = o.fullGrid !== false; loaded = true; }
   }catch(e){}
   if(!loaded) generate(8);
   try{ theme = localStorage.getItem(STORE_KEY + '.theme'); }catch(e){}

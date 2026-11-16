@@ -35,10 +35,12 @@ canvas{display:block;width:100%;height:100%;cursor:crosshair}
 </head>
 <body>
 <aside>
-  <h1>⚔ Dungeon Sketcher <span style="font-size:11px;color:var(--mut);font-weight:400;letter-spacing:0">v1.4</span></h1>
+  <h1>⚔ Dungeon Sketcher <span style="font-size:11px;color:var(--mut);font-weight:400;letter-spacing:0">v1.5</span></h1>
 
   <h2>Tools</h2>
   <div class="tools" id="tools"></div>
+
+  <div class="row"><label>Cave brush size</label><input type="number" id="caveN" value="2" min="1" max="6"></div>
 
   <h2>Edit</h2>
   <div class="row">
@@ -86,6 +88,7 @@ canvas{display:block;width:100%;height:100%;cursor:crosshair}
   <h2>How to</h2>
   <div class="help">
     <b>Room:</b> drag a rectangle. Shift+drag cuts rock back in.<br>
+    <b>Cave:</b> paint cave floor freehand; its walls come out rough and rounded (Shift = erase). Set the brush size under the tools.<br>
     <b>Inner wall:</b> drag along the grid lines inside a room. Click a wall piece to remove it, Shift+drag erases.<br>
     <b>Corridor:</b> paint floor freehand (Shift = erase).<br>
     <b>Doors:</b> click the border between two squares. Click it again to remove the door.<br>
@@ -112,7 +115,7 @@ const TOOLS = [
   ['trap','Trap','X'],['pillar','Pillar','P'],
   ['statue','Statue','U'],['chest','Chest','H'],
   ['num','Room #','N'],['text','Note','W'],
-  ['wall','Inner wall','I'],
+  ['wall','Inner wall','I'],['cave','Cave','V'],
 ];
 const ROTATABLE = new Set(['door','locked','secret','portcullis','stairs']);
 const DOORLIKE  = new Set(['door','locked','secret','portcullis']);
@@ -135,7 +138,7 @@ let hover = null, drag = null, pan = null, spaceDown = false, lastPaint = null;
 function blank(w, h){ return {w, h, floor: new Array(w*h).fill(0), feats: {}, walls: {}, doors: {}}; }
 const idx = (x,y) => y*S.w + x;
 const inB = (x,y) => x>=0 && y>=0 && x<S.w && y<S.h;
-const isF = (x,y) => inB(x,y) && S.floor[idx(x,y)] === 1;
+const isF = (x,y) => inB(x,y) && S.floor[idx(x,y)] > 0;   // floor: 1 = built (straight walls), 2 = cave (rough walls)
 const key = (x,y) => x + ',' + y;
 // Inner walls live on cell edges: 'h,x,y' = top edge of cell x,y ; 'v,x,y' = left edge of cell x,y
 function edgeParts(k){ const p = k.split(','); return [p[0], +p[1], +p[2]]; }
@@ -154,7 +157,7 @@ function doRedo(){ if(!redoStack.length) return; undoStack.push(JSON.stringify(S
 function persist(){
   try{ localStorage.setItem(STORE_KEY, JSON.stringify({S, style, fullGrid})); }catch(e){}
 }
-function changed(){ persist(); syncInputs(); draw(); }
+function changed(){ geoDirty = true; persist(); syncInputs(); draw(); }
 
 // ---------- canvas ----------
 const cv = document.getElementById('cv');
@@ -173,6 +176,61 @@ function hash(x,y,k){
   let h = Math.imul(x,374761393) + Math.imul(y,668265263) + Math.imul(k,1442695041);
   h = Math.imul(h ^ (h>>>13), 1274126177);
   return ((h ^ (h>>>16))>>>0) / 4294967296;
+}
+
+// ---------- outline of the floor ----------
+// The edge of all floor is traced into closed loops (in cell units). Next to built floor the loop
+// follows the grid exactly; next to cave floor the corners are pushed around a little and rounded off.
+let geoDirty = true, geo = [];
+function buildGeo(){
+  const w = S.w, h = S.h, VW = w+1, out = new Uint8Array((w+1)*(h+1));
+  // every floor/rock border becomes an arrow that runs clockwise around its floor cell: bit 0 east, 1 south, 2 west, 3 north
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++) if(S.floor[y*w+x] > 0){
+    if(!isF(x,y-1)) out[y*VW+x] |= 1;
+    if(!isF(x+1,y)) out[y*VW+x+1] |= 2;
+    if(!isF(x,y+1)) out[(y+1)*VW+x+1] |= 4;
+    if(!isF(x-1,y)) out[(y+1)*VW+x] |= 8;
+  }
+  const DX = [1,0,-1,0], DY = [0,1,0,-1], loops = [];
+  for(let v=0; v<out.length; v++) while(out[v]){
+    let d = 0; while(!(out[v] & (1<<d))) d++;
+    const E = []; let cv = v, cd = d;
+    for(;;){
+      const sx = cv % VW, sy = (cv - sx)/VW;
+      const cx = sx - ((cd===1 || cd===2) ? 1 : 0), cy = sy - (cd>=2 ? 1 : 0);   // the floor cell this arrow belongs to
+      const ex = sx + DX[cd], ey = sy + DY[cd];
+      E.push([ex, ey, S.floor[cy*w+cx] === 2]);
+      if(cv!==v || cd!==d) out[cv] &= ~(1<<cd);
+      cv = ey*VW + ex;
+      let nd = -1;
+      for(const t of [(cd+1)&3, cd, (cd+3)&3]) if(out[cv] & (1<<t)){ nd = t; break; }   // turn right first: stay with the same cell
+      if(nd < 0 || (cv===v && nd===d)) break;
+      cd = nd;
+    }
+    out[v] &= ~(1<<d);
+    const n = E.length, C = [];
+    for(let i=0;i<n;i++){
+      const [x,y,r] = E[i], rough = r && E[(i+1)%n][2];
+      C.push(rough ? [x + (hash(x,y,11)-.5)*.5, y + (hash(x,y,12)-.5)*.5, 1] : [x, y, 0]);
+    }
+    const M = i => { const a = C[(i+n-1)%n], b = C[i]; return [(a[0]+b[0])/2, (a[1]+b[1])/2]; };
+    const L = {m: M(0), s: []};
+    for(let i=0;i<n;i++){ const p = M((i+1)%n); L.s.push([C[i][2], C[i][0], C[i][1], p[0], p[1]]); }
+    loops.push(L);
+  }
+  geo = loops; geoDirty = false;
+}
+function geoPath(g, s, vx, vy){
+  if(geoDirty) buildGeo();
+  g.beginPath();
+  for(const L of geo){
+    g.moveTo(vx + L.m[0]*s, vy + L.m[1]*s);
+    for(const q of L.s){
+      if(q[0]) g.quadraticCurveTo(vx + q[1]*s, vy + q[2]*s, vx + q[3]*s, vy + q[4]*s);
+      else { g.lineTo(vx + q[1]*s, vy + q[2]*s); g.lineTo(vx + q[3]*s, vy + q[4]*s); }
+    }
+    g.closePath();
+  }
 }
 
 function render(g, VW, VH, s, vx, vy, editor){
@@ -214,26 +272,24 @@ function render(g, VW, VH, s, vx, vy, editor){
       g.stroke(); g.restore();
     }
   }
-  // floor
-  g.fillStyle = st.floor;
-  for(let y=y0; y<=y1; y++) for(let x=x0; x<=x1; x++) if(isF(x,y)){ const [px,py] = P(x,y); g.fillRect(px-.5,py-.5,s+1,s+1); }
-  // floor grid
+  // floor: everything inside the outline
+  geoPath(g, s, vx, vy);
+  g.fillStyle = st.floor; g.fill();
+  // floor grid, kept inside the outline
+  g.save(); g.clip();
   g.strokeStyle = st.grid; g.lineWidth = 1; g.beginPath();
   for(let y=y0; y<=y1; y++) for(let x=x0; x<=x1; x++) if(isF(x,y)){
     const [px,py] = P(x,y); const L = Math.round(px)+.5, T = Math.round(py)+.5;
     g.moveTo(L,T); g.lineTo(L+s,T); g.moveTo(L,T); g.lineTo(L,T+s);
+    if(!isF(x+1,y)){ g.moveTo(L+s,T); g.lineTo(L+s,T+s); }
+    if(!isF(x,y+1)){ g.moveTo(L,T+s); g.lineTo(L+s,T+s); }
   }
-  g.stroke();
-  // walls
-  g.strokeStyle = st.wall; g.lineWidth = Math.max(2, s*.13); g.lineCap = 'square'; g.beginPath();
-  for(let y=y0; y<=y1; y++) for(let x=x0; x<=x1; x++) if(isF(x,y)){
-    const [px,py] = P(x,y);
-    if(!isF(x,y-1)){ g.moveTo(px,py); g.lineTo(px+s,py); }
-    if(!isF(x,y+1)){ g.moveTo(px,py+s); g.lineTo(px+s,py+s); }
-    if(!isF(x-1,y)){ g.moveTo(px,py); g.lineTo(px,py+s); }
-    if(!isF(x+1,y)){ g.moveTo(px+s,py); g.lineTo(px+s,py+s); }
-  }
+  g.stroke(); g.restore();
+  // walls: the outline itself
+  geoPath(g, s, vx, vy);
+  g.strokeStyle = st.wall; g.lineWidth = Math.max(2, s*.13); g.lineJoin = 'miter'; g.stroke();
   // inner walls
+  g.lineCap = 'square'; g.beginPath();
   for(const k in S.walls){
     if(!edgeOK(k)) continue;
     const [t,x,y] = edgeParts(k); const [px,py] = P(x,y);
@@ -370,7 +426,10 @@ function paint(){
     const [t,x,y] = edgeParts(hoverW.ek);
     hline(ox+x*cs, oy+y*cs, ox+(t==='h'?x+1:x)*cs, oy+(t==='h'?y:y+1)*cs, '#d9a441');
   }
-  if(!edgeTool() && hover && inB(hover.x,hover.y) && !pan) outline(ox+hover.x*cs+1, oy+hover.y*cs+1, cs-2, cs-2, '#d9a441');
+  if(!edgeTool() && hover && inB(hover.x,hover.y) && !pan){
+    const n = tool==='cave' ? caveSize() : 1, o = Math.floor((n-1)/2);
+    outline(ox+(hover.x-o)*cs+1, oy+(hover.y-o)*cs+1, n*cs-2, n*cs-2, '#d9a441');
+  }
   updateStatus();
 }
 
@@ -408,8 +467,16 @@ function wallAt(e){
   const ek = m===dy ? 'h,'+cx+','+cy : m===1-dy ? 'h,'+cx+','+(cy+1) : m===dx ? 'v,'+cx+','+cy : 'v,'+(cx+1)+','+cy;
   return {vx: Math.round(fx), vy: Math.round(fy), ek, m};
 }
+const caveSize = () => Math.max(1, Math.min(6, parseInt(document.getElementById('caveN').value,10) || 2));
+let brushN = 1;
+function stamp(x,y,v){ // a roundish brush, brushN cells across
+  const n = brushN, o = Math.floor((n-1)/2), c = (n-1)/2, lim = n*n/4 - .3;
+  if(n<=1){ setCell(x,y,v); return; }
+  for(let j=0;j<n;j++) for(let i=0;i<n;i++) if((i-c)*(i-c) + (j-c)*(j-c) <= lim) setCell(x+i-o, y+j-o, v);
+}
 function setCell(x,y,v){
   if(!inB(x,y)) return;
+  geoDirty = true;
   S.floor[idx(x,y)] = v;
   if(!v){
     delete S.feats[key(x,y)];
@@ -422,7 +489,9 @@ function setCell(x,y,v){
 function paintLine(a,b,v){ // Bresenham so fast strokes don't skip cells
   let x0=a.x, y0=a.y; const x1=b.x, y1=b.y;
   const dx=Math.abs(x1-x0), dy=-Math.abs(y1-y0), sx=x0<x1?1:-1, sy=y0<y1?1:-1; let err=dx+dy;
-  for(;;){ setCell(x0,y0,v); if(x0===x1&&y0===y1) break; const e2=2*err; if(e2>=dy){err+=dy;x0+=sx;} if(e2<=dx){err+=dx;y0+=sy;} }
+  for(;;){ stamp(x0,y0,v); if(x0===x1&&y0===y1) break; const e2=2*err, mx=e2>=dy, my=e2<=dx; if(mx){err+=dy;x0+=sx;}
+    if(mx && my && v===2 && brushN===1) stamp(x0,y0,v); // thin cave lines: no diagonal-only steps, so the cave stays in one piece
+    if(my){err+=dx;y0+=sy;} }
 }
 function nextNum(){
   let m = 0;
@@ -472,11 +541,12 @@ cv.addEventListener('mousedown', e => {
   } else if(tool==='wall'){
     const w = wallAt(e);
     drag = {wall:true, x0:w.vx, y0:w.vy, x1:w.vx, y1:w.vy, ek:w.ek, erase:e.shiftKey};
-  } else if(tool==='paint' || tool==='erase'){
+  } else if(tool==='paint' || tool==='erase' || tool==='cave'){
     snap();
-    const v = (tool==='paint' && !e.shiftKey) ? 1 : 0;
+    const v = tool==='erase' || e.shiftKey ? 0 : tool==='cave' ? 2 : 1;
+    brushN = tool==='cave' ? caveSize() : 1;
     drag = {paint:true, v};
-    lastPaint = c; setCell(c.x,c.y,v);
+    lastPaint = c; stamp(c.x,c.y,v);
   } else {
     placeFeat(c);
   }
